@@ -2,10 +2,59 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import os
 import subprocess
 import sys
-from .fingerprint import fingerprint_pr, find_duplicates, Fingerprint
+import time
+from pathlib import Path
+from .fingerprint import fingerprint_pr, find_duplicates
+
+
+# ANSI color codes
+class Colors:
+    BOLD = '\033[1m'
+    DIM = '\033[2m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    CYAN = '\033[96m'
+    RESET = '\033[0m'
+
+    @classmethod
+    def disable(cls):
+        cls.BOLD = cls.DIM = cls.GREEN = cls.YELLOW = ''
+        cls.RED = cls.CYAN = cls.RESET = ''
+
+
+def get_cache_dir() -> Path:
+    """Get cache directory, creating if needed."""
+    cache_dir = Path.home() / '.cache' / 'bepo'
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return cache_dir
+
+
+def get_cache_key(repo: str, pr_num: int) -> str:
+    """Generate cache key for a PR diff."""
+    return hashlib.md5(f"{repo}:{pr_num}".encode()).hexdigest()[:12]
+
+
+def load_cached_diff(repo: str, pr_num: int) -> str | None:
+    """Load diff from cache if exists and fresh (< 1 hour)."""
+    cache_file = get_cache_dir() / f"{get_cache_key(repo, pr_num)}.diff"
+    if cache_file.exists():
+        # Check if cache is fresh (< 1 hour)
+        age = time.time() - cache_file.stat().st_mtime
+        if age < 3600:
+            return cache_file.read_text()
+    return None
+
+
+def save_cached_diff(repo: str, pr_num: int, diff: str):
+    """Save diff to cache."""
+    cache_file = get_cache_dir() / f"{get_cache_key(repo, pr_num)}.diff"
+    cache_file.write_text(diff)
 
 
 def fetch_prs(repo: str, limit: int = 50) -> list[dict]:
@@ -16,18 +65,38 @@ def fetch_prs(repo: str, limit: int = 50) -> list[dict]:
         capture_output=True, text=True
     )
     if result.returncode != 0:
-        print(f"Error fetching PRs: {result.stderr}", file=sys.stderr)
+        print(f"{Colors.RED}Error fetching PRs: {result.stderr}{Colors.RESET}", file=sys.stderr)
         sys.exit(1)
     return json.loads(result.stdout)
 
 
-def fetch_diff(repo: str, pr_num: int) -> str:
-    """Fetch diff for a PR."""
+def fetch_diff(repo: str, pr_num: int, use_cache: bool = True) -> str:
+    """Fetch diff for a PR, using cache if available."""
+    if use_cache:
+        cached = load_cached_diff(repo, pr_num)
+        if cached is not None:
+            return cached
+
     result = subprocess.run(
         ['gh', 'pr', 'diff', str(pr_num), '--repo', repo],
         capture_output=True, text=True
     )
-    return result.stdout if result.returncode == 0 else ""
+    diff = result.stdout if result.returncode == 0 else ""
+
+    if diff and use_cache:
+        save_cached_diff(repo, pr_num, diff)
+
+    return diff
+
+
+def print_progress(current: int, total: int, pr_num: int, cached: bool = False):
+    """Print progress indicator."""
+    bar_width = 20
+    filled = int(bar_width * current / total)
+    bar = '█' * filled + '░' * (bar_width - filled)
+    cache_indicator = f" {Colors.DIM}(cached){Colors.RESET}" if cached else ""
+    print(f"\r  {Colors.DIM}[{bar}]{Colors.RESET} {current}/{total} PR#{pr_num}{cache_indicator}    ",
+          end='', file=sys.stderr, flush=True)
 
 
 def main():
@@ -39,6 +108,7 @@ Examples:
   bepo check --repo owner/repo
   bepo check --repo owner/repo --threshold 0.5
   bepo check --repo owner/repo --json
+  bepo check --repo owner/repo --no-cache
         '''
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
@@ -51,25 +121,53 @@ Examples:
     check.add_argument('--limit', '-l', type=int, default=50,
                        help='Max PRs to check (default: 50)')
     check.add_argument('--json', action='store_true', help='Output JSON')
+    check.add_argument('--no-cache', action='store_true', help='Disable diff caching')
+    check.add_argument('--no-color', action='store_true', help='Disable colored output')
+
+    # clear-cache command
+    clear = subparsers.add_parser('clear-cache', help='Clear cached diffs')
 
     args = parser.parse_args()
 
-    if args.command == 'check':
+    if args.command == 'clear-cache':
+        run_clear_cache()
+    elif args.command == 'check':
+        if args.no_color or not sys.stderr.isatty():
+            Colors.disable()
         run_check(args)
+
+
+def run_clear_cache():
+    """Clear the diff cache."""
+    cache_dir = get_cache_dir()
+    count = 0
+    for f in cache_dir.glob('*.diff'):
+        f.unlink()
+        count += 1
+    print(f"Cleared {count} cached diffs.")
 
 
 def run_check(args):
     """Run duplicate check on a repo."""
-    print(f"Fetching PRs from {args.repo}...", file=sys.stderr)
+    use_cache = not args.no_cache
+
+    print(f"{Colors.BOLD}Fetching PRs from {args.repo}...{Colors.RESET}", file=sys.stderr)
     prs = fetch_prs(args.repo, args.limit)
-    print(f"Found {len(prs)} open PRs", file=sys.stderr)
+    print(f"Found {Colors.CYAN}{len(prs)}{Colors.RESET} open PRs\n", file=sys.stderr)
 
     # Fingerprint each PR
     fingerprints = []
-    for pr in prs:
+    cache_hits = 0
+    start_time = time.time()
+
+    for i, pr in enumerate(prs, 1):
         pr_num = pr['number']
-        print(f"  Analyzing PR#{pr_num}...", file=sys.stderr)
-        diff = fetch_diff(args.repo, pr_num)
+        cached = load_cached_diff(args.repo, pr_num) is not None if use_cache else False
+        if cached:
+            cache_hits += 1
+        print_progress(i, len(prs), pr_num, cached)
+
+        diff = fetch_diff(args.repo, pr_num, use_cache=use_cache)
         if diff:
             fp = fingerprint_pr(
                 f"#{pr_num}",
@@ -78,6 +176,15 @@ def run_check(args):
                 body=pr.get('body', '') or '',
             )
             fingerprints.append(fp)
+
+    elapsed = time.time() - start_time
+    print(f"\r{' ' * 60}\r", end='', file=sys.stderr)  # Clear progress line
+
+    if use_cache and cache_hits > 0:
+        print(f"{Colors.DIM}Analyzed {len(prs)} PRs in {elapsed:.1f}s ({cache_hits} cached){Colors.RESET}\n",
+              file=sys.stderr)
+    else:
+        print(f"{Colors.DIM}Analyzed {len(prs)} PRs in {elapsed:.1f}s{Colors.RESET}\n", file=sys.stderr)
 
     # Find duplicates
     duplicates = find_duplicates(fingerprints, threshold=args.threshold)
@@ -90,6 +197,7 @@ def run_check(args):
                 'similarity': round(d.similarity, 3),
                 'shared_issues': d.shared_issues,
                 'shared_files': d.shared_files,
+                'shared_code_lines': d.shared_code_lines,
                 'reason': d.reason,
             }
             for d in duplicates
@@ -97,13 +205,21 @@ def run_check(args):
         print(json.dumps(output, indent=2))
     else:
         if not duplicates:
-            print("\nNo duplicates found.")
+            print(f"{Colors.GREEN}No duplicates found.{Colors.RESET}")
         else:
-            print(f"\nFound {len(duplicates)} potential duplicates:\n")
+            print(f"{Colors.BOLD}Found {len(duplicates)} potential duplicates:{Colors.RESET}\n")
             for d in duplicates:
-                print(f"{d.pr_a} <-> {d.pr_b}")
-                print(f"  Similarity: {d.similarity:.0%}")
-                print(f"  Reason: {d.reason}")
+                # Color code by similarity
+                if d.similarity >= 0.8:
+                    sim_color = Colors.RED
+                elif d.similarity >= 0.6:
+                    sim_color = Colors.YELLOW
+                else:
+                    sim_color = Colors.RESET
+
+                print(f"{Colors.BOLD}{d.pr_a} <-> {d.pr_b}{Colors.RESET}")
+                print(f"  {sim_color}Similarity: {d.similarity:.0%}{Colors.RESET}")
+                print(f"  {Colors.DIM}Reason: {d.reason}{Colors.RESET}")
                 print()
 
 
