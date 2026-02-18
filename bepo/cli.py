@@ -70,6 +70,18 @@ def fetch_prs(repo: str, limit: int = 50) -> list[dict]:
     return json.loads(result.stdout)
 
 
+def fetch_pr_info(repo: str, pr_num: int) -> dict | None:
+    """Fetch info for a single PR."""
+    result = subprocess.run(
+        ['gh', 'pr', 'view', str(pr_num), '--repo', repo,
+         '--json', 'number,title,body'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None
+    return json.loads(result.stdout)
+
+
 def fetch_diff(repo: str, pr_num: int, use_cache: bool = True) -> str:
     """Fetch diff for a PR, using cache if available."""
     if use_cache:
@@ -107,13 +119,13 @@ def main():
 Examples:
   bepo check --repo owner/repo
   bepo check --repo owner/repo --threshold 0.5
+  bepo check-pr --repo owner/repo --pr 123
   bepo check --repo owner/repo --json
-  bepo check --repo owner/repo --no-cache
         '''
     )
     subparsers = parser.add_subparsers(dest='command', required=True)
 
-    # check command
+    # check command - compare all PRs
     check = subparsers.add_parser('check', help='Check repo for duplicate PRs')
     check.add_argument('--repo', '-r', required=True, help='GitHub repo (owner/repo)')
     check.add_argument('--threshold', '-t', type=float, default=0.4,
@@ -123,6 +135,18 @@ Examples:
     check.add_argument('--json', action='store_true', help='Output JSON')
     check.add_argument('--no-cache', action='store_true', help='Disable diff caching')
     check.add_argument('--no-color', action='store_true', help='Disable colored output')
+
+    # check-pr command - compare single PR against others
+    check_pr = subparsers.add_parser('check-pr', help='Check if a PR duplicates others')
+    check_pr.add_argument('--repo', '-r', required=True, help='GitHub repo (owner/repo)')
+    check_pr.add_argument('--pr', '-p', type=int, required=True, help='PR number to check')
+    check_pr.add_argument('--threshold', '-t', type=float, default=0.4,
+                          help='Similarity threshold (default: 0.4)')
+    check_pr.add_argument('--limit', '-l', type=int, default=50,
+                          help='Max other PRs to compare against (default: 50)')
+    check_pr.add_argument('--json', action='store_true', help='Output JSON')
+    check_pr.add_argument('--no-cache', action='store_true', help='Disable diff caching')
+    check_pr.add_argument('--no-color', action='store_true', help='Disable colored output')
 
     # clear-cache command
     clear = subparsers.add_parser('clear-cache', help='Clear cached diffs')
@@ -135,6 +159,10 @@ Examples:
         if args.no_color or not sys.stderr.isatty():
             Colors.disable()
         run_check(args)
+    elif args.command == 'check-pr':
+        if args.no_color or not sys.stderr.isatty():
+            Colors.disable()
+        run_check_pr(args)
 
 
 def run_clear_cache():
@@ -220,6 +248,112 @@ def run_check(args):
                 print(f"{Colors.BOLD}{d.pr_a} <-> {d.pr_b}{Colors.RESET}")
                 print(f"  {sim_color}Similarity: {d.similarity:.0%}{Colors.RESET}")
                 print(f"  {Colors.DIM}Reason: {d.reason}{Colors.RESET}")
+                print()
+
+
+def run_check_pr(args):
+    """Check a single PR against all other open PRs."""
+    use_cache = not args.no_cache
+    target_pr = args.pr
+
+    # Fetch target PR info
+    print(f"{Colors.BOLD}Fetching PR #{target_pr}...{Colors.RESET}", file=sys.stderr)
+    pr_info = fetch_pr_info(args.repo, target_pr)
+    if not pr_info:
+        print(f"{Colors.RED}Error: Could not fetch PR #{target_pr}{Colors.RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    target_diff = fetch_diff(args.repo, target_pr, use_cache=use_cache)
+    if not target_diff:
+        print(f"{Colors.RED}Error: Could not fetch diff for PR #{target_pr}{Colors.RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    target_fp = fingerprint_pr(
+        f"#{target_pr}",
+        target_diff,
+        title=pr_info.get('title', ''),
+        body=pr_info.get('body', '') or '',
+    )
+
+    # Fetch other open PRs
+    print(f"{Colors.BOLD}Fetching other open PRs...{Colors.RESET}", file=sys.stderr)
+    prs = fetch_prs(args.repo, args.limit)
+    # Exclude the target PR
+    prs = [p for p in prs if p['number'] != target_pr]
+    print(f"Comparing against {Colors.CYAN}{len(prs)}{Colors.RESET} other PRs\n", file=sys.stderr)
+
+    # Fingerprint other PRs
+    other_fps = []
+    cache_hits = 0
+    start_time = time.time()
+
+    for i, pr in enumerate(prs, 1):
+        pr_num = pr['number']
+        cached = load_cached_diff(args.repo, pr_num) is not None if use_cache else False
+        if cached:
+            cache_hits += 1
+        print_progress(i, len(prs), pr_num, cached)
+
+        diff = fetch_diff(args.repo, pr_num, use_cache=use_cache)
+        if diff:
+            fp = fingerprint_pr(
+                f"#{pr_num}",
+                diff,
+                title=pr.get('title', ''),
+                body=pr.get('body', '') or '',
+            )
+            other_fps.append(fp)
+
+    elapsed = time.time() - start_time
+    print(f"\r{' ' * 60}\r", end='', file=sys.stderr)
+
+    if use_cache and cache_hits > 0:
+        print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s ({cache_hits} cached){Colors.RESET}\n", file=sys.stderr)
+    else:
+        print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s{Colors.RESET}\n", file=sys.stderr)
+
+    # Compare target against all others
+    matches = []
+    for other_fp in other_fps:
+        sim = target_fp.similarity(other_fp)
+        if sim >= args.threshold:
+            shared_issues = list(set(target_fp.issue_refs) & set(other_fp.issue_refs))
+            shared_code = set(target_fp.code_lines) & set(other_fp.code_lines)
+
+            if shared_issues:
+                reason = f"Both fix #{', #'.join(shared_issues[:2])}"
+            elif len(shared_code) >= 3:
+                reason = f"Same code: {len(shared_code)} lines overlap"
+            else:
+                reason = f"Similar files/domains"
+
+            matches.append({
+                'pr': other_fp.pr_id,
+                'similarity': sim,
+                'shared_issues': shared_issues,
+                'shared_code_lines': len(shared_code),
+                'reason': reason,
+            })
+
+    matches.sort(key=lambda x: x['similarity'], reverse=True)
+
+    if args.json:
+        print(json.dumps({'target': f'#{target_pr}', 'matches': matches}, indent=2))
+    else:
+        if not matches:
+            print(f"{Colors.GREEN}PR #{target_pr} has no similar PRs.{Colors.RESET}")
+        else:
+            print(f"{Colors.BOLD}PR #{target_pr} is similar to:{Colors.RESET}\n")
+            for m in matches:
+                if m['similarity'] >= 0.8:
+                    sim_color = Colors.RED
+                elif m['similarity'] >= 0.6:
+                    sim_color = Colors.YELLOW
+                else:
+                    sim_color = Colors.RESET
+
+                print(f"  {Colors.BOLD}{m['pr']}{Colors.RESET} - {sim_color}{m['similarity']:.0%}{Colors.RESET}")
+                print(f"    {Colors.DIM}{m['reason']}{Colors.RESET}")
                 print()
 
 
