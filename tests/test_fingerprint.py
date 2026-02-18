@@ -40,11 +40,32 @@ def test_similar_prs_detected():
 
 
 def test_different_prs_not_flagged():
-    diff1 = "+++ b/src/auth/login.ts\n+ code"
-    diff2 = "+++ b/src/payments/stripe.ts\n+ code"
+    diff1 = "+++ b/src/auth/login.ts\n+ const user = await authenticate(token)"
+    diff2 = "+++ b/src/payments/stripe.ts\n+ const charge = await stripe.charges.create(amount)"
 
     fp1 = fingerprint_pr("#1", diff1)
     fp2 = fingerprint_pr("#2", diff2)
 
     dups = find_duplicates([fp1, fp2], threshold=0.5)
     assert len(dups) == 0
+
+
+def test_same_code_detected():
+    """PRs with identical code changes should be flagged."""
+    diff1 = """+++ b/src/config.ts
++ startupGraceMs = 5000
++ retryCount = 3
++ timeout = 30000
+"""
+    diff2 = """+++ b/src/config.ts
++ startupGraceMs = 5000
++ retryCount = 3
++ timeout = 30000
+"""
+    fp1 = fingerprint_pr("#1", diff1)
+    fp2 = fingerprint_pr("#2", diff2)
+
+    dups = find_duplicates([fp1, fp2], threshold=0.3)
+    assert len(dups) == 1
+    assert dups[0].shared_code_lines >= 3
+    assert "code" in dups[0].reason.lower() or dups[0].similarity > 0.8
