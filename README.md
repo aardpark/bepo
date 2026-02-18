@@ -100,7 +100,7 @@ bepo fingerprints each PR by extracting:
 | Signal | Weight | What it catches |
 |--------|--------|-----------------|
 | Same issue ref (#123) | 10.0 | Definite duplicate |
-| Same code changes | 8.0 | Identical lines added/removed |
+| Same code changes (IDF-weighted) | 8.0 | Rare lines weighted more than common boilerplate |
 | Same files touched | 6.0 | PRs modifying same code |
 | Same feature domain | 3.0 | auth, messaging, database, etc. |
 | Same imports | 1.0 | Similar dependencies |
@@ -134,23 +134,52 @@ for d in dups:
 
 ## GitHub Action
 
+Add to your repo to automatically detect duplicate PRs and post a warning comment:
+
 ```yaml
 name: PR Duplicate Check
 on: [pull_request]
 
 jobs:
-  check:
+  check-duplicates:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: aardpark/bepo@v1
         with:
-          python-version: '3.11'
-      - run: pip install bepo
-      - run: bepo check --repo ${{ github.repository }} --json
-        env:
-          GH_TOKEN: ${{ github.token }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          threshold: '0.5'  # optional, default 0.5
 ```
+
+When a PR is opened that looks like a duplicate, bepo posts a comment:
+
+> ## ⚠️ Potential Duplicate PRs Detected
+>
+> This PR may be similar to existing open PRs:
+>
+> | PR | Similarity | Reason |
+> |---|---|---|
+> | [#123](link) | 85% | Both fix #456 |
+> | [#124](link) | 71% | Same code: 10 lines overlap |
+>
+> ---
+> *Detected by [bepo](https://github.com/aardpark/bepo)*
+
+### Action Inputs
+
+| Input | Description | Default |
+|-------|-------------|---------|
+| `github-token` | GitHub token for API access | `${{ github.token }}` |
+| `threshold` | Similarity threshold (0.0-1.0) | `0.5` |
+| `limit` | Max PRs to compare against | `50` |
+| `comment` | Post comment on PR | `true` |
+
+### Action Outputs
+
+| Output | Description |
+|--------|-------------|
+| `has_duplicates` | `true` if duplicates found |
+| `match_count` | Number of matches |
+| `matches` | JSON array of matches |
 
 ## Why This Works
 
@@ -158,6 +187,8 @@ Duplicates share obvious signals:
 - **Same code** = Identical changes (639 shared lines caught SoundChain duplicates)
 - **Same issue ref** = Same bug report (#19843 appeared in 4 Matrix PRs)
 - **Same files** = Same bug location (100% overlap for Feishu cluster)
+
+**IDF weighting** makes rare lines matter more than common boilerplate. A shared `startupGraceMs = 5000` is a stronger signal than a shared `return null`.
 
 Code overlap and issue refs catch most duplicates. Simple works.
 

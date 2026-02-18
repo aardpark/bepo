@@ -1,7 +1,9 @@
 """PR fingerprinting and duplicate detection."""
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 from dataclasses import dataclass, field
 
 
@@ -15,7 +17,7 @@ class Fingerprint:
     imports: list[str] = field(default_factory=list)
     code_lines: list[str] = field(default_factory=list)  # normalized changed lines
 
-    def similarity(self, other: "Fingerprint") -> float:
+    def similarity(self, other: "Fingerprint", idf_weights: dict[str, float] | None = None) -> float:
         """Compute similarity score between two fingerprints.
 
         Weights:
@@ -24,6 +26,11 @@ class Fingerprint:
         - File path overlap (5.0): Same files = likely related
         - Domain overlap (3.0): Same feature area
         - Imports (1.0): Similar dependencies
+
+        Args:
+            other: Another fingerprint to compare against
+            idf_weights: Optional IDF weights for code lines. If provided,
+                        rare lines are weighted more heavily than common ones.
         """
         scores = []
         weights = []
@@ -40,7 +47,12 @@ class Fingerprint:
         if self.code_lines and other.code_lines:
             c1, c2 = set(self.code_lines), set(other.code_lines)
             if c1 | c2:
-                code_sim = len(c1 & c2) / len(c1 | c2)
+                if idf_weights:
+                    # IDF-weighted: rare lines matter more
+                    code_sim = _idf_weighted_jaccard(c1, c2, idf_weights)
+                else:
+                    # Plain Jaccard
+                    code_sim = len(c1 & c2) / len(c1 | c2)
                 if code_sim > 0.1:  # only count if meaningful overlap
                     scores.append(code_sim)
                     weights.append(8.0)
@@ -91,6 +103,50 @@ class Fingerprint:
         if not scores:
             return 0.0
         return sum(s * w for s, w in zip(scores, weights)) / sum(weights)
+
+
+def _compute_idf_weights(fingerprints: list["Fingerprint"]) -> dict[str, float]:
+    """Compute IDF weights for code lines across all fingerprints.
+
+    IDF = log(N / df) where N is total documents and df is document frequency.
+    Rare lines (appear in few PRs) get high weight.
+    Common lines (appear in many PRs) get low weight.
+    """
+    n_docs = len(fingerprints)
+    if n_docs == 0:
+        return {}
+
+    # Count how many fingerprints contain each code line
+    df: Counter[str] = Counter()
+    for fp in fingerprints:
+        for line in set(fp.code_lines):  # set() to count each line once per doc
+            df[line] += 1
+
+    # Compute IDF: log(N / df)
+    # Lines appearing in all docs get weight ~0, rare lines get high weight
+    return {line: math.log(n_docs / count) for line, count in df.items()}
+
+
+def _idf_weighted_jaccard(set_a: set[str], set_b: set[str], idf: dict[str, float]) -> float:
+    """Compute IDF-weighted Jaccard similarity.
+
+    Instead of plain |A∩B| / |A∪B|, weight each line by its IDF.
+    Rare lines contribute more to similarity than common boilerplate.
+    """
+    if not set_a or not set_b:
+        return 0.0
+
+    intersection = set_a & set_b
+    union = set_a | set_b
+
+    if not union:
+        return 0.0
+
+    # Sum IDF weights (default to 1.0 for lines not in corpus)
+    intersection_weight = sum(idf.get(line, 1.0) for line in intersection)
+    union_weight = sum(idf.get(line, 1.0) for line in union)
+
+    return intersection_weight / union_weight if union_weight > 0 else 0.0
 
 
 @dataclass
@@ -237,15 +293,22 @@ def find_duplicates(
     fingerprints: list[Fingerprint],
     threshold: float = 0.4,
 ) -> list[Duplicate]:
-    """Find duplicate PRs from a list of fingerprints."""
+    """Find duplicate PRs from a list of fingerprints.
+
+    Uses IDF weighting for code similarity - rare lines matter more than
+    common boilerplate like 'return null' or 'import React'.
+    """
     duplicates = []
+
+    # Compute IDF weights across all fingerprints
+    idf_weights = _compute_idf_weights(fingerprints)
 
     for i, fp_a in enumerate(fingerprints):
         for j, fp_b in enumerate(fingerprints):
             if i >= j:
                 continue
 
-            sim = fp_a.similarity(fp_b)
+            sim = fp_a.similarity(fp_b, idf_weights=idf_weights)
             if sim < threshold:
                 continue
 

@@ -28,6 +28,23 @@ class Colors:
         cls.RED = cls.CYAN = cls.RESET = ''
 
 
+def check_gh_installed():
+    """Check if GitHub CLI is installed and authenticated."""
+    try:
+        result = subprocess.run(
+            ['gh', '--version'],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"{Colors.RED}Error: GitHub CLI (gh) is not working properly.{Colors.RESET}", file=sys.stderr)
+            print(f"Install it from: https://cli.github.com/", file=sys.stderr)
+            sys.exit(1)
+    except FileNotFoundError:
+        print(f"{Colors.RED}Error: GitHub CLI (gh) is not installed.{Colors.RESET}", file=sys.stderr)
+        print(f"Install it from: https://cli.github.com/", file=sys.stderr)
+        sys.exit(1)
+
+
 def get_cache_dir() -> Path:
     """Get cache directory, creating if needed."""
     cache_dir = Path.home() / '.cache' / 'bepo'
@@ -177,6 +194,7 @@ def run_clear_cache():
 
 def run_check(args):
     """Run duplicate check on a repo."""
+    check_gh_installed()
     use_cache = not args.no_cache
 
     print(f"{Colors.BOLD}Fetching PRs from {args.repo}...{Colors.RESET}", file=sys.stderr)
@@ -253,6 +271,7 @@ def run_check(args):
 
 def run_check_pr(args):
     """Check a single PR against all other open PRs."""
+    check_gh_installed()
     use_cache = not args.no_cache
     target_pr = args.pr
 
