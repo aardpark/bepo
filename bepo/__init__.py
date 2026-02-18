@@ -4,18 +4,22 @@ Detects duplicate and related pull requests using static analysis.
 No ML, no embeddings, just smart diff parsing.
 """
 
-__version__ = "0.7.0"
+__version__ = "0.8.0"
 
 from .fingerprint import (
     fingerprint_pr,
     find_duplicates,
+    find_clusters,
     Fingerprint,
     Duplicate,
+    Cluster,
 )
 
 __all__ = [
     "fingerprint_pr",
     "find_duplicates",
+    "find_clusters",
     "Fingerprint",
     "Duplicate",
+    "Cluster",
 ]

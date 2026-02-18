@@ -5,6 +5,10 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
 
 
 @dataclass
@@ -350,3 +354,122 @@ def find_duplicates(
 
     duplicates.sort(key=lambda d: d.similarity, reverse=True)
     return duplicates
+
+
+@dataclass
+class Cluster:
+    """A cluster of related PRs."""
+    hub: str  # Most connected PR (likely the "original")
+    members: list[str]  # All PRs in cluster
+    density: float  # Spectral density (λ₂/λ_max) - higher = tighter cluster
+    avg_similarity: float  # Average pairwise similarity
+
+
+def find_clusters(
+    fingerprints: list[Fingerprint],
+    edge_threshold: float = 0.5,
+) -> list[Cluster]:
+    """Find PR clusters using spectral graph analysis.
+
+    Builds a similarity graph and uses the Fiedler value (λ₂) to measure
+    cluster density. Identifies the "hub" PR in each cluster.
+
+    Args:
+        fingerprints: List of PR fingerprints
+        edge_threshold: Minimum similarity to create an edge
+
+    Returns:
+        List of Clusters, sorted by avg_similarity (highest first)
+    """
+    try:
+        import numpy as np
+    except ImportError:
+        return []  # numpy not available, skip clustering
+
+    n = len(fingerprints)
+    if n < 2:
+        return []
+
+    # Build similarity matrix (reuse existing pairwise computation)
+    idf_weights = _compute_idf_weights(fingerprints)
+    adj = np.zeros((n, n))
+    for i in range(n):
+        for j in range(i + 1, n):
+            sim = fingerprints[i].similarity(fingerprints[j], idf_weights)
+            if sim >= edge_threshold:
+                adj[i, j] = sim
+                adj[j, i] = sim
+
+    # Find connected components via BFS
+    visited: set[int] = set()
+    clusters: list[Cluster] = []
+
+    for start in range(n):
+        if start in visited:
+            continue
+
+        # BFS to find component
+        component: list[int] = []
+        queue = [start]
+        while queue:
+            node = queue.pop(0)
+            if node in visited:
+                continue
+            visited.add(node)
+            component.append(node)
+            for neighbor in range(n):
+                if neighbor not in visited and adj[node, neighbor] > 0:
+                    queue.append(neighbor)
+
+        if len(component) < 2:
+            continue
+
+        # Compute spectral density (Fiedler value)
+        density = _spectral_density(adj, component)
+
+        # Find hub (highest degree within cluster)
+        degrees = [(i, adj[i][[j for j in component]].sum()) for i in component]
+        hub_idx = max(degrees, key=lambda x: x[1])[0]
+
+        # Average similarity within cluster
+        sims = [adj[i, j] for i in component for j in component if i < j and adj[i, j] > 0]
+        avg_sim = float(np.mean(sims)) if sims else 0.0
+
+        clusters.append(Cluster(
+            hub=fingerprints[hub_idx].pr_id,
+            members=[fingerprints[i].pr_id for i in component],
+            density=density,
+            avg_similarity=avg_sim,
+        ))
+
+    clusters.sort(key=lambda c: c.avg_similarity, reverse=True)
+    return clusters
+
+
+def _spectral_density(adj: "np.ndarray", nodes: list[int]) -> float:
+    """Compute spectral density via Fiedler value (λ₂).
+
+    Returns λ₂/λ_max as a normalized density measure.
+    Higher values indicate tighter clusters.
+    """
+    import numpy as np
+
+    if len(nodes) < 3:
+        return 0.0
+
+    # Extract subgraph
+    idx = np.array(nodes)
+    sub_adj = adj[np.ix_(idx, idx)]
+
+    # Build Laplacian: L = D - A
+    degrees = sub_adj.sum(axis=1)
+    L = np.diag(degrees) - sub_adj
+
+    try:
+        eigenvalues = np.linalg.eigvalsh(L)
+        eigenvalues = np.sort(eigenvalues)
+        lambda_2 = max(0.0, float(eigenvalues[1])) if len(eigenvalues) > 1 else 0.0
+        lambda_max = max(1e-10, float(eigenvalues[-1]))
+        return min(1.0, lambda_2 / lambda_max)
+    except np.linalg.LinAlgError:
+        return 0.0
