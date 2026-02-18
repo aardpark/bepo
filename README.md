@@ -83,8 +83,8 @@ Requires [GitHub CLI](https://cli.github.com/) (`gh`) to be installed and authen
 # Check a repo for duplicate PRs
 bepo check --repo owner/repo
 
-# Adjust sensitivity (default: 0.4, higher = stricter)
-bepo check --repo owner/repo --threshold 0.5
+# Adjust sensitivity (default: 0.5, higher = stricter)
+bepo check --repo owner/repo --threshold 0.6
 
 # Check more PRs
 bepo check --repo owner/repo --limit 100

@@ -145,8 +145,8 @@ Examples:
     # check command - compare all PRs
     check = subparsers.add_parser('check', help='Check repo for duplicate PRs')
     check.add_argument('--repo', '-r', required=True, help='GitHub repo (owner/repo)')
-    check.add_argument('--threshold', '-t', type=float, default=0.4,
-                       help='Similarity threshold (default: 0.4)')
+    check.add_argument('--threshold', '-t', type=float, default=0.5,
+                       help='Similarity threshold (default: 0.5)')
     check.add_argument('--limit', '-l', type=int, default=50,
                        help='Max PRs to check (default: 50)')
     check.add_argument('--json', action='store_true', help='Output JSON')
@@ -157,8 +157,8 @@ Examples:
     check_pr = subparsers.add_parser('check-pr', help='Check if a PR duplicates others')
     check_pr.add_argument('--repo', '-r', required=True, help='GitHub repo (owner/repo)')
     check_pr.add_argument('--pr', '-p', type=int, required=True, help='PR number to check')
-    check_pr.add_argument('--threshold', '-t', type=float, default=0.4,
-                          help='Similarity threshold (default: 0.4)')
+    check_pr.add_argument('--threshold', '-t', type=float, default=0.5,
+                          help='Similarity threshold (default: 0.5)')
     check_pr.add_argument('--limit', '-l', type=int, default=50,
                           help='Max other PRs to compare against (default: 50)')
     check_pr.add_argument('--json', action='store_true', help='Output JSON')

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bepo"
-version = "0.6.0"
+version = "0.7.0"
 description = "Detect duplicate PRs in GitHub repos"
 readme = "README.md"
 license = "MIT"

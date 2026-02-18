@@ -291,7 +291,7 @@ def fingerprint_pr(
 
 def find_duplicates(
     fingerprints: list[Fingerprint],
-    threshold: float = 0.4,
+    threshold: float = 0.5,
 ) -> list[Duplicate]:
     """Find duplicate PRs from a list of fingerprints.
 
