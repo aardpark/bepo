@@ -4,6 +4,8 @@ Detect duplicate pull requests in GitHub repos.
 
 No ML, no embeddings, no API keys. Just static analysis of diffs.
 
+A maintainer with 100 open PRs can run `bepo check --repo foo/bar` and in 5 minutes get a ranked list of "you should look at these pairs." That saves hours of manual review.
+
 ## The Problem
 
 Large repos waste engineering time on duplicate PRs. When multiple contributors fix the same bug independently, only one PR gets merged — the rest is wasted effort.
@@ -98,7 +100,8 @@ bepo fingerprints each PR by extracting:
 | Signal | Weight | What it catches |
 |--------|--------|-----------------|
 | Same issue ref (#123) | 10.0 | Definite duplicate |
-| Same files touched | 5.0 | PRs modifying same code |
+| Same code changes | 8.0 | Identical lines added/removed |
+| Same files touched | 6.0 | PRs modifying same code |
 | Same feature domain | 3.0 | auth, messaging, database, etc. |
 | Same imports | 1.0 | Similar dependencies |
 
@@ -107,9 +110,10 @@ Then computes pairwise Jaccard similarity.
 **That's it.** No embeddings, no LLM calls. Just:
 - Parse `+++ b/path` from diffs
 - Regex for `#\d+` issue refs
+- Compare actual code changes
 - Set intersection for similarity
 
-~200 lines of Python.
+~300 lines of Python.
 
 ## As a Library
 
@@ -151,11 +155,11 @@ jobs:
 ## Why This Works
 
 Duplicates share obvious signals:
-- **Same files** = Same bug location (100% overlap for Feishu cluster)
+- **Same code** = Identical changes (639 shared lines caught SoundChain duplicates)
 - **Same issue ref** = Same bug report (#19843 appeared in 4 Matrix PRs)
-- **Same directory** = Same feature area
+- **Same files** = Same bug location (100% overlap for Feishu cluster)
 
-File overlap and issue refs catch most duplicates. Simple works.
+Code overlap and issue refs catch most duplicates. Simple works.
 
 ## Origin Story
 
