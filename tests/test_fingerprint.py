@@ -1,8 +1,11 @@
 """Tests for bepo fingerprinting."""
 import inspect
+import json
 import pytest
+from unittest.mock import patch, MagicMock
 from bepo import fingerprint_pr, find_duplicates, Fingerprint
 from bepo.fingerprint import find_duplicates as _find_duplicates, _dominant_prefix, _dominant_component_token
+from bepo.cli import fetch_commit_diff, fetch_commit_info
 
 
 class TestFingerprinting:
@@ -554,3 +557,53 @@ class TestComponentIsolation:
         fp1 = fingerprint_pr("#1", diff_a)
         fp2 = fingerprint_pr("#2", diff_b)
         assert len(find_duplicates([fp1, fp2])) == 0
+
+
+class TestCheckCommitHelpers:
+    """Tests for check-commit fetch helpers."""
+
+    def test_fetch_commit_diff_success(self):
+        """Returns stdout on success."""
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = "diff --git a/foo.py b/foo.py\n+++ b/foo.py\n+ x = 1\n"
+        with patch("bepo.cli.subprocess.run", return_value=mock) as run:
+            result = fetch_commit_diff("owner/repo", "abc1234")
+        assert result == mock.stdout
+        args = run.call_args[0][0]
+        assert "repos/owner/repo/commits/abc1234" in args[2]
+        assert "application/vnd.github.diff" in " ".join(args)
+
+    def test_fetch_commit_diff_failure_returns_empty(self):
+        """Returns empty string on API error."""
+        mock = MagicMock()
+        mock.returncode = 1
+        mock.stdout = ""
+        with patch("bepo.cli.subprocess.run", return_value=mock):
+            result = fetch_commit_diff("owner/repo", "bad_sha")
+        assert result == ""
+
+    def test_fetch_commit_info_success(self):
+        """Parses JSON response correctly."""
+        payload = {"sha": "abc1234abcd5678", "message": "Fix auth bug\n\nFixes #456"}
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = json.dumps(payload)
+        with patch("bepo.cli.subprocess.run", return_value=mock):
+            result = fetch_commit_info("owner/repo", "abc1234")
+        assert result["sha"] == "abc1234abcd5678"
+        assert result["message"].startswith("Fix auth bug")
+
+    def test_fetch_commit_info_failure_returns_none(self):
+        """Returns None when API call fails."""
+        mock = MagicMock()
+        mock.returncode = 1
+        with patch("bepo.cli.subprocess.run", return_value=mock):
+            result = fetch_commit_info("owner/repo", "bad_sha")
+        assert result is None
+
+    def test_commit_fingerprint_uses_message_for_issue_refs(self):
+        """Commit title/body feed into issue ref extraction."""
+        diff = "+++ b/auth/login.py\n+ def login(): pass\n"
+        fp = fingerprint_pr("@abc12345", diff, title="Fix auth bug", body="Fixes #456")
+        assert "456" in fp.issue_refs

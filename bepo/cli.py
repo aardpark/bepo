@@ -103,6 +103,28 @@ def fetch_prs(repo: str, limit: int = 50, since_date: str | None = None) -> list
     return json.loads(result.stdout)
 
 
+def fetch_commit_diff(repo: str, sha: str) -> str:
+    """Fetch unified diff for a commit via GitHub API."""
+    result = subprocess.run(
+        ['gh', 'api', f'repos/{repo}/commits/{sha}',
+         '-H', 'Accept: application/vnd.github.diff'],
+        capture_output=True, text=True, errors='replace'
+    )
+    return result.stdout if result.returncode == 0 else ""
+
+
+def fetch_commit_info(repo: str, sha: str) -> dict | None:
+    """Fetch commit metadata (sha + message) via GitHub API."""
+    result = subprocess.run(
+        ['gh', 'api', f'repos/{repo}/commits/{sha}',
+         '--jq', '{sha: .sha, message: .commit.message}'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return None
+    return json.loads(result.stdout)
+
+
 def fetch_pr_info(repo: str, pr_num: int) -> dict | None:
     """Fetch info for a single PR."""
     result = subprocess.run(
@@ -185,6 +207,17 @@ Examples:
     check_pr.add_argument('--no-cache', action='store_true', help='Disable diff caching')
     check_pr.add_argument('--no-color', action='store_true', help='Disable colored output')
 
+    # check-commit command - compare a single commit against open PRs
+    check_commit = subparsers.add_parser('check-commit', help='Check if a commit duplicates open PRs')
+    check_commit.add_argument('--repo', '-r', required=True, help='GitHub repo (owner/repo)')
+    check_commit.add_argument('--commit', '-c', required=True, help='Commit SHA (full or short)')
+    check_commit.add_argument('--threshold', '-t', type=float, default=0.65,
+                              help='Similarity threshold (default: 0.65)')
+    check_commit.add_argument('--limit', '-l', type=int, default=50,
+                              help='Max open PRs to compare against (default: 50)')
+    check_commit.add_argument('--json', action='store_true', help='Output JSON')
+    check_commit.add_argument('--no-color', action='store_true', help='Disable colored output')
+
     # clear-cache command
     subparsers.add_parser('clear-cache', help='Clear cached diffs')
 
@@ -200,6 +233,10 @@ Examples:
         if args.no_color or not sys.stderr.isatty():
             Colors.disable()
         run_check_pr(args)
+    elif args.command == 'check-commit':
+        if args.no_color or not sys.stderr.isatty():
+            Colors.disable()
+        run_check_commit(args)
 
 
 def run_clear_cache():
@@ -385,6 +422,99 @@ def run_check_pr(args):
             print(f"{Colors.GREEN}PR #{target_pr} has no similar PRs.{Colors.RESET}")
         else:
             print(f"{Colors.BOLD}PR #{target_pr} is similar to:{Colors.RESET}\n")
+            for m in matches:
+                if m['similarity'] >= 0.8:
+                    sim_color = Colors.RED
+                elif m['similarity'] >= 0.6:
+                    sim_color = Colors.YELLOW
+                else:
+                    sim_color = Colors.RESET
+
+                print(f"  {Colors.BOLD}{m['pr']}{Colors.RESET} - {sim_color}{m['similarity']:.0%}{Colors.RESET}")
+                print(f"    {Colors.DIM}{m['reason']}{Colors.RESET}")
+                print()
+
+
+def run_check_commit(args):
+    """Check a single commit against all open PRs."""
+    check_gh_installed()
+
+    sha = args.commit
+    print(f"{Colors.BOLD}Fetching commit {sha}...{Colors.RESET}", file=sys.stderr)
+    info = fetch_commit_info(args.repo, sha)
+    if not info:
+        print(f"{Colors.RED}Error: Could not fetch commit {sha}{Colors.RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    diff = fetch_commit_diff(args.repo, sha)
+    if not diff:
+        print(f"{Colors.RED}Error: Could not fetch diff for commit {sha}{Colors.RESET}", file=sys.stderr)
+        sys.exit(1)
+
+    full_sha = info['sha']
+    commit_id = f"@{full_sha[:8]}"
+    message = info.get('message', '')
+    title, _, body = message.partition('\n')
+
+    commit_fp = fingerprint_pr(commit_id, diff, title=title.strip(), body=body.strip())
+
+    # Fetch open PRs and fingerprint them
+    print(f"{Colors.BOLD}Fetching open PRs...{Colors.RESET}", file=sys.stderr)
+    prs = fetch_prs(args.repo, args.limit)
+    print(f"Comparing against {Colors.CYAN}{len(prs)}{Colors.RESET} open PRs\n", file=sys.stderr)
+
+    use_cache = True
+    other_fps = []
+    cache_hits = 0
+    start_time = time.time()
+
+    for i, pr in enumerate(prs, 1):
+        pr_num = pr['number']
+        cached = load_cached_diff(args.repo, pr_num) is not None
+        if cached:
+            cache_hits += 1
+        print_progress(i, len(prs), pr_num, cached)
+
+        pr_diff = fetch_diff(args.repo, pr_num, use_cache=use_cache)
+        if pr_diff:
+            fp = fingerprint_pr(
+                f"#{pr_num}",
+                pr_diff,
+                title=pr.get('title', ''),
+                body=pr.get('body', '') or '',
+            )
+            other_fps.append(fp)
+
+    elapsed = time.time() - start_time
+    print(f"\r{' ' * 60}\r", end='', file=sys.stderr)
+    if cache_hits > 0:
+        print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s ({cache_hits} cached){Colors.RESET}\n", file=sys.stderr)
+    else:
+        print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s{Colors.RESET}\n", file=sys.stderr)
+
+    all_fps = [commit_fp] + other_fps
+    duplicates = find_duplicates(all_fps, threshold=args.threshold)
+    matches_raw = [d for d in duplicates if d.pr_a == commit_id or d.pr_b == commit_id]
+    matches_raw.sort(key=lambda d: d.similarity, reverse=True)
+
+    matches = [
+        {
+            'pr': d.pr_b if d.pr_a == commit_id else d.pr_a,
+            'similarity': d.similarity,
+            'shared_issues': d.shared_issues,
+            'shared_code_lines': d.shared_code_lines,
+            'reason': d.reason,
+        }
+        for d in matches_raw
+    ]
+
+    if args.json:
+        print(json.dumps({'commit': commit_id, 'matches': matches}, indent=2))
+    else:
+        if not matches:
+            print(f"{Colors.GREEN}Commit {commit_id} has no similar open PRs.{Colors.RESET}")
+        else:
+            print(f"{Colors.BOLD}Commit {commit_id} is similar to:{Colors.RESET}\n")
             for m in matches:
                 if m['similarity'] >= 0.8:
                     sim_color = Colors.RED
