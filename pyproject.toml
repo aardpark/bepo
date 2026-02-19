@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "bepo"
-version = "0.8.0"
+version = "1.0.0"
 description = "Detect duplicate PRs in GitHub repos"
 readme = "README.md"
 license = "MIT"
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [{ name = "Andrew Park" }]
 keywords = ["github", "pull-request", "duplicate", "detection", "cli"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
