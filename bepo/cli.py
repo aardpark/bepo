@@ -125,6 +125,24 @@ def fetch_commit_info(repo: str, sha: str) -> dict | None:
     return json.loads(result.stdout)
 
 
+def fetch_recent_commits(repo: str, limit: int = 100, since_date: str | None = None) -> list[dict]:
+    """Fetch recent commits from the repo's default branch.
+
+    Returns list of dicts with 'sha' and 'message' keys.
+    """
+    params = f'per_page={min(limit, 100)}'
+    if since_date:
+        params += f'&since={since_date}T00:00:00Z'
+    result = subprocess.run(
+        ['gh', 'api', f'repos/{repo}/commits?{params}',
+         '--jq', '[.[] | {sha: .sha, message: .commit.message}]'],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        return []
+    return json.loads(result.stdout)
+
+
 def fetch_pr_info(repo: str, pr_num: int) -> dict | None:
     """Fetch info for a single PR."""
     result = subprocess.run(
@@ -207,14 +225,20 @@ Examples:
     check_pr.add_argument('--no-cache', action='store_true', help='Disable diff caching')
     check_pr.add_argument('--no-color', action='store_true', help='Disable colored output')
 
-    # check-commit command - compare a single commit against open PRs
-    check_commit = subparsers.add_parser('check-commit', help='Check if a commit duplicates open PRs')
+    # check-commit command - compare a single commit against open PRs and recent commits
+    check_commit = subparsers.add_parser(
+        'check-commit', help='Check if a commit duplicates open PRs or recent commits'
+    )
     check_commit.add_argument('--repo', '-r', required=True, help='GitHub repo (owner/repo)')
     check_commit.add_argument('--commit', '-c', required=True, help='Commit SHA (full or short)')
     check_commit.add_argument('--threshold', '-t', type=float, default=0.65,
                               help='Similarity threshold (default: 0.65)')
     check_commit.add_argument('--limit', '-l', type=int, default=50,
                               help='Max open PRs to compare against (default: 50)')
+    check_commit.add_argument('--since', default='30d',
+                              help='Compare against commits from last N days (default: 30d)')
+    check_commit.add_argument('--commit-limit', type=int, default=100,
+                              help='Max recent commits to compare against (default: 100)')
     check_commit.add_argument('--json', action='store_true', help='Output JSON')
     check_commit.add_argument('--no-color', action='store_true', help='Disable colored output')
 
@@ -436,7 +460,7 @@ def run_check_pr(args):
 
 
 def run_check_commit(args):
-    """Check a single commit against all open PRs."""
+    """Check a single commit against open PRs and recent commits."""
     check_gh_installed()
 
     sha = args.commit
@@ -458,15 +482,14 @@ def run_check_commit(args):
 
     commit_fp = fingerprint_pr(commit_id, diff, title=title.strip(), body=body.strip())
 
-    # Fetch open PRs and fingerprint them
+    other_fps = []
+    start_time = time.time()
+    cache_hits = 0
+
+    # Fetch and fingerprint open PRs
     print(f"{Colors.BOLD}Fetching open PRs...{Colors.RESET}", file=sys.stderr)
     prs = fetch_prs(args.repo, args.limit)
-    print(f"Comparing against {Colors.CYAN}{len(prs)}{Colors.RESET} open PRs\n", file=sys.stderr)
-
-    use_cache = True
-    other_fps = []
-    cache_hits = 0
-    start_time = time.time()
+    print(f"  {Colors.CYAN}{len(prs)}{Colors.RESET} open PRs", file=sys.stderr)
 
     for i, pr in enumerate(prs, 1):
         pr_num = pr['number']
@@ -474,23 +497,42 @@ def run_check_commit(args):
         if cached:
             cache_hits += 1
         print_progress(i, len(prs), pr_num, cached)
-
-        pr_diff = fetch_diff(args.repo, pr_num, use_cache=use_cache)
+        pr_diff = fetch_diff(args.repo, pr_num, use_cache=True)
         if pr_diff:
-            fp = fingerprint_pr(
+            other_fps.append(fingerprint_pr(
                 f"#{pr_num}",
                 pr_diff,
                 title=pr.get('title', ''),
                 body=pr.get('body', '') or '',
-            )
-            other_fps.append(fp)
+            ))
+    print(f"\r{' ' * 60}\r", end='', file=sys.stderr)
+
+    # Fetch and fingerprint recent commits
+    since_date = _parse_since(args.since) if args.since else None
+    print(f"{Colors.BOLD}Fetching recent commits ({args.since})...{Colors.RESET}", file=sys.stderr)
+    recent = fetch_recent_commits(args.repo, limit=args.commit_limit, since_date=since_date)
+    # Exclude the target commit itself
+    recent = [c for c in recent if not c['sha'].startswith(full_sha[:8])
+              and not full_sha.startswith(c['sha'][:8])]
+    print(f"  {Colors.CYAN}{len(recent)}{Colors.RESET} recent commits", file=sys.stderr)
+
+    for i, c in enumerate(recent, 1):
+        print_progress(i, len(recent), 0)
+        c_diff = fetch_commit_diff(args.repo, c['sha'])
+        if c_diff:
+            c_msg = c.get('message', '')
+            c_title, _, c_body = c_msg.partition('\n')
+            other_fps.append(fingerprint_pr(
+                f"@{c['sha'][:8]}",
+                c_diff,
+                title=c_title.strip(),
+                body=c_body.strip(),
+            ))
+    print(f"\r{' ' * 60}\r", end='', file=sys.stderr)
 
     elapsed = time.time() - start_time
-    print(f"\r{' ' * 60}\r", end='', file=sys.stderr)
-    if cache_hits > 0:
-        print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s ({cache_hits} cached){Colors.RESET}\n", file=sys.stderr)
-    else:
-        print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s{Colors.RESET}\n", file=sys.stderr)
+    suffix = f" ({cache_hits} cached)" if cache_hits > 0 else ""
+    print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s{suffix}{Colors.RESET}\n", file=sys.stderr)
 
     all_fps = [commit_fp] + other_fps
     duplicates = find_duplicates(all_fps, threshold=args.threshold)
@@ -499,7 +541,7 @@ def run_check_commit(args):
 
     matches = [
         {
-            'pr': d.pr_b if d.pr_a == commit_id else d.pr_a,
+            'match': d.pr_b if d.pr_a == commit_id else d.pr_a,
             'similarity': d.similarity,
             'shared_issues': d.shared_issues,
             'shared_code_lines': d.shared_code_lines,
@@ -512,7 +554,7 @@ def run_check_commit(args):
         print(json.dumps({'commit': commit_id, 'matches': matches}, indent=2))
     else:
         if not matches:
-            print(f"{Colors.GREEN}Commit {commit_id} has no similar open PRs.{Colors.RESET}")
+            print(f"{Colors.GREEN}Commit {commit_id} has no similar PRs or commits.{Colors.RESET}")
         else:
             print(f"{Colors.BOLD}Commit {commit_id} is similar to:{Colors.RESET}\n")
             for m in matches:
@@ -523,7 +565,7 @@ def run_check_commit(args):
                 else:
                     sim_color = Colors.RESET
 
-                print(f"  {Colors.BOLD}{m['pr']}{Colors.RESET} - {sim_color}{m['similarity']:.0%}{Colors.RESET}")
+                print(f"  {Colors.BOLD}{m['match']}{Colors.RESET} - {sim_color}{m['similarity']:.0%}{Colors.RESET}")
                 print(f"    {Colors.DIM}{m['reason']}{Colors.RESET}")
                 print()
 

@@ -4,7 +4,7 @@ Detects duplicate and related pull requests using static analysis.
 No ML, no embeddings, just smart diff parsing.
 """
 
-__version__ = "1.1.0"
+__version__ = "1.2.0"
 
 from .fingerprint import (
     fingerprint_pr,

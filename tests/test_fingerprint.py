@@ -5,7 +5,7 @@ import pytest
 from unittest.mock import patch, MagicMock
 from bepo import fingerprint_pr, find_duplicates, Fingerprint
 from bepo.fingerprint import find_duplicates as _find_duplicates, _dominant_prefix, _dominant_component_token
-from bepo.cli import fetch_commit_diff, fetch_commit_info
+from bepo.cli import fetch_commit_diff, fetch_commit_info, fetch_recent_commits
 
 
 class TestFingerprinting:
@@ -607,3 +607,28 @@ class TestCheckCommitHelpers:
         diff = "+++ b/auth/login.py\n+ def login(): pass\n"
         fp = fingerprint_pr("@abc12345", diff, title="Fix auth bug", body="Fixes #456")
         assert "456" in fp.issue_refs
+
+    def test_fetch_recent_commits_success(self):
+        """Parses list of commit objects correctly."""
+        payload = [
+            {"sha": "aaa111", "message": "Fix login bug"},
+            {"sha": "bbb222", "message": "Add feature"},
+        ]
+        mock = MagicMock()
+        mock.returncode = 0
+        mock.stdout = json.dumps(payload)
+        with patch("bepo.cli.subprocess.run", return_value=mock) as run:
+            result = fetch_recent_commits("owner/repo", limit=50, since_date="2024-01-01")
+        assert len(result) == 2
+        assert result[0]["sha"] == "aaa111"
+        # since_date should appear in the API URL
+        url_arg = run.call_args[0][0][2]
+        assert "since=2024-01-01" in url_arg
+
+    def test_fetch_recent_commits_failure_returns_empty(self):
+        """Returns empty list on API error."""
+        mock = MagicMock()
+        mock.returncode = 1
+        with patch("bepo.cli.subprocess.run", return_value=mock):
+            result = fetch_recent_commits("owner/repo")
+        assert result == []
