@@ -74,6 +74,25 @@ def save_cached_diff(repo: str, pr_num: int, diff: str):
     cache_file.write_text(diff)
 
 
+def get_commit_cache_key(repo: str, sha: str) -> str:
+    """Generate cache key for a commit diff."""
+    return hashlib.md5(f"commit:{repo}:{sha}".encode()).hexdigest()[:12]
+
+
+def load_cached_commit_diff(repo: str, sha: str) -> str | None:
+    """Load commit diff from cache. No TTL — commits are immutable."""
+    cache_file = get_cache_dir() / f"{get_commit_cache_key(repo, sha)}.diff"
+    if cache_file.exists():
+        return cache_file.read_text()
+    return None
+
+
+def save_cached_commit_diff(repo: str, sha: str, diff: str):
+    """Save commit diff to cache."""
+    cache_file = get_cache_dir() / f"{get_commit_cache_key(repo, sha)}.diff"
+    cache_file.write_text(diff)
+
+
 def _parse_since(value: str) -> str:
     """Parse --since value (e.g. '30d') into an ISO date string (YYYY-MM-DD)."""
     if not value.endswith('d') or not value[:-1].isdigit():
@@ -174,13 +193,14 @@ def fetch_diff(repo: str, pr_num: int, use_cache: bool = True) -> str:
     return diff
 
 
-def print_progress(current: int, total: int, pr_num: int, cached: bool = False):
+def print_progress(current: int, total: int, pr_num: int, cached: bool = False, label: str | None = None):
     """Print progress indicator."""
     bar_width = 20
     filled = int(bar_width * current / total)
     bar = '█' * filled + '░' * (bar_width - filled)
     cache_indicator = f" {Colors.DIM}(cached){Colors.RESET}" if cached else ""
-    print(f"\r  {Colors.DIM}[{bar}]{Colors.RESET} {current}/{total} PR#{pr_num}{cache_indicator}    ",
+    id_str = label if label is not None else f"PR#{pr_num}"
+    print(f"\r  {Colors.DIM}[{bar}]{Colors.RESET} {current}/{total} {id_str}{cache_indicator}    ",
           end='', file=sys.stderr, flush=True)
 
 
@@ -430,7 +450,7 @@ def run_check_pr(args):
 
     matches = [
         {
-            'pr': d.pr_b if d.pr_a == target_id else d.pr_a,
+            'match': d.pr_b if d.pr_a == target_id else d.pr_a,
             'similarity': d.similarity,
             'shared_issues': d.shared_issues,
             'shared_code_lines': d.shared_code_lines,
@@ -454,7 +474,7 @@ def run_check_pr(args):
                 else:
                     sim_color = Colors.RESET
 
-                print(f"  {Colors.BOLD}{m['pr']}{Colors.RESET} - {sim_color}{m['similarity']:.0%}{Colors.RESET}")
+                print(f"  {Colors.BOLD}{m['match']}{Colors.RESET} - {sim_color}{m['similarity']:.0%}{Colors.RESET}")
                 print(f"    {Colors.DIM}{m['reason']}{Colors.RESET}")
                 print()
 
@@ -516,14 +536,21 @@ def run_check_commit(args):
               and not full_sha.startswith(c['sha'][:8])]
     print(f"  {Colors.CYAN}{len(recent)}{Colors.RESET} recent commits", file=sys.stderr)
 
+    commit_cache_hits = 0
     for i, c in enumerate(recent, 1):
-        print_progress(i, len(recent), 0)
-        c_diff = fetch_commit_diff(args.repo, c['sha'])
+        short = c['sha'][:8]
+        cached_cdiff = load_cached_commit_diff(args.repo, c['sha'])
+        if cached_cdiff is not None:
+            commit_cache_hits += 1
+        print_progress(i, len(recent), 0, cached=cached_cdiff is not None, label=f"@{short}")
+        c_diff = cached_cdiff or fetch_commit_diff(args.repo, c['sha'])
         if c_diff:
+            if cached_cdiff is None:
+                save_cached_commit_diff(args.repo, c['sha'], c_diff)
             c_msg = c.get('message', '')
             c_title, _, c_body = c_msg.partition('\n')
             other_fps.append(fingerprint_pr(
-                f"@{c['sha'][:8]}",
+                f"@{short}",
                 c_diff,
                 title=c_title.strip(),
                 body=c_body.strip(),
@@ -531,7 +558,8 @@ def run_check_commit(args):
     print(f"\r{' ' * 60}\r", end='', file=sys.stderr)
 
     elapsed = time.time() - start_time
-    suffix = f" ({cache_hits} cached)" if cache_hits > 0 else ""
+    total_cached = cache_hits + commit_cache_hits
+    suffix = f" ({total_cached} cached)" if total_cached > 0 else ""
     print(f"{Colors.DIM}Analyzed in {elapsed:.1f}s{suffix}{Colors.RESET}\n", file=sys.stderr)
 
     all_fps = [commit_fp] + other_fps
